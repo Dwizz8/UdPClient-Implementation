@@ -10,18 +10,24 @@ public class UdpFileClient
 {
     public static void Main(string[] args)
     {
+        //checks if the correct number of arguments are passed
         if (args.Length != 3)
         {
             Console.Error.WriteLine("Usage: mono UdpFileClient.exe <hostname> <port> <file-list>");
             return;
         }
 
+        //parses all the lines
         string hostname = args[0];
         int port = int.Parse(args[1]);
+
+        //reads all the filenames to download, one per line
         string[] filenames = File.ReadAllLines(args[2]);
 
+        //creates the server end point from the hostname
         IPEndPoint serverEndPoint = new IPEndPoint(Dns.GetHostAddresses(hostname)[0], port);
 
+        //download each file one at a time
         foreach(string filename in filenames)
         {
             Console.WriteLine(filename);
@@ -32,17 +38,23 @@ public class UdpFileClient
     static void DownloadFile(IPEndPoint serverEndPoint, string filename)
     {
         // Phase 1 - Send DOWNLOAD and get OK/ERR
+
+        //create a UDP socket for the control channel
         UdpClient controlSocket = new UdpClient();
         byte[] downloadBytes = Encoding.ASCII.GetBytes($"DOWNLOAD {filename}");
+        
+        //send DOWNLOAD <filename> to the servers listener port
         controlSocket.Send(downloadBytes, downloadBytes.Length, serverEndPoint);
 
+        //blank endpoint, will be filled in by Receive with the servers address
         IPEndPoint remoteEndPoint = new IPEndPoint(IPAddress.Any, 0);
         
-        // set timeout on control socket in case server is unreachable
+        //set 5 second timeout on control socket in case server is unreachable
         controlSocket.Client.ReceiveTimeout = 5000;
         byte[] responseBytes;
         try
         {
+            //gets the ERR response on the control socket
             responseBytes = controlSocket.Receive(ref remoteEndPoint);
         }
         catch (SocketException)
@@ -52,9 +64,11 @@ public class UdpFileClient
             return;
         }
 
+        //decode the response from bytes to string
         string response = Encoding.ASCII.GetString(responseBytes).Trim();
         string[] parts = response.Split(' ');
 
+        //if the server say file not found, print the ERR line and stop
         if (parts[0] == "ERR")
         {
             Console.WriteLine(response);
@@ -62,6 +76,7 @@ public class UdpFileClient
             return;
         }
 
+        //also checks if it says neither "ERR" or "OK"
         if (parts[0] != "OK")
         {
             Console.WriteLine($"ERROR {filename} unexpected response");
@@ -121,18 +136,26 @@ public class UdpFileClient
                             chunkReceived = true;
                             break;
                         }
-                        // non matching — ignore and keep waiting
+                        
+                        //no statement for when its a stale packet, just ignores
                     }
                     catch (SocketException)
                     {
-                        // timed out — break inner loop and retry
-                        break;
+                        //flush stale packets before retransmit
+                        dataSocket.Client.ReceiveTimeout = 1;
+                        try { dataSocket.Receive(ref senderEndPoint); } catch { }
+
+                        //increment tries and attempts to receive again
+                        tries++;
+                        dataSocket.Send(getMsg, getMsg.Length, dataEndPoint); // retransmit
                     }
                 }
 
+                //if you get a matching reply don't retry
                 if (chunkReceived) break;
             }
 
+            //if all 5 of the attempts fail give up
             if (!chunkReceived)
             {
                 Console.WriteLine($"ERROR {filename} too many retries");
@@ -141,6 +164,7 @@ public class UdpFileClient
                 return;
             }
 
+            //update how many bytes we have and print progress
             bytesReceived += (end - start + 1);
             int progress = (int)(bytesReceived * 100 / fileSize);
             Console.WriteLine($"{filename} {progress}%");
@@ -150,7 +174,7 @@ public class UdpFileClient
         byte[] closeMsg = Encoding.ASCII.GetBytes($"FILE {filename} CLOSE");
         dataSocket.Send(closeMsg, closeMsg.Length, dataEndPoint);
 
-        // wait for CLOSE_OK
+        //wait for CLOSE_OK
         dataSocket.Client.ReceiveTimeout = 5000;
         try
         {
@@ -158,10 +182,10 @@ public class UdpFileClient
         }
         catch (SocketException)
         {
-            // spec says if CLOSE_OK is lost, protocol does not recover
-            // just save the file anyway
+            //if CLOSE_OK is lost, protocol does not recover so just save it anyway
         }
 
+        //write the completed bytes to disk
         File.WriteAllBytes(filename, fileBuffer);
         Console.WriteLine($"OK {filename}");
 
